@@ -35,16 +35,16 @@ class XMLLoader(ABC):
         if node is not None:
             self.load_xml(node)
         
-    @abstractmethod
-    def load_xml(self, node: ET.Element):
-        """
-        Initialize the instrument class attributes from XML received from CsPy
-
-         Args:
-            'node': type is ET.Element. tag should match self.expectedRoot
-            node.tag == self.expectedRoot
-        """
-        pass
+    # @abstractmethod
+    # def load_xml(self, node: ET.Element):
+    #     """
+    #     Initialize the instrument class attributes from XML received from CsPy
+    #
+    #      Args:
+    #         'node': type is ET.Element. tag should match self.expectedRoot
+    #         node.tag == self.expectedRoot
+    #     """
+    #     pass
 
     @staticmethod
     def str_to_bool(boolstr: str) -> bool:
@@ -183,21 +183,21 @@ class Instrument(XMLLoader):
     def exit_measurement(self, value):
         self.pxi.exit_measurement = value
    
-    @abstractmethod
-    def load_xml(self, node: ET.Element):
-        """
-        Initialize the instrument class attributes from XML received from CsPy
-        
-         Args:
-            'node': type is ET.Element. tag should match self.expectedRoot
-            node.tag == self.expectedRoot
-        """
-
-        if not (self.exit_measurement or self.stop_connections):
-            return
-
-        as_ms = f"node to open camera is tagged {node.tag}. Must be tagged {self.expectedRoot}"
-        assert node.tag == self.expectedRoot, as_ms
+    # @abstractmethod
+    # def load_xml(self, node: ET.Element):
+    #     """
+    #     Initialize the instrument class attributes from XML received from CsPy
+    #
+    #      Args:
+    #         'node': type is ET.Element. tag should match self.expectedRoot
+    #         node.tag == self.expectedRoot
+    #     """
+    #
+    #     if not (self.exit_measurement or self.stop_connections):
+    #         return
+    #
+    #     as_ms = f"node to open camera is tagged {node.tag}. Must be tagged {self.expectedRoot}"
+    #     assert node.tag == self.expectedRoot, as_ms
 
     @abstractmethod
     def init(self):

@@ -10,12 +10,13 @@ camera and initialization of the hardware of said camera.
 
 import numpy as np
 import xml.etree.ElementTree as ET
-from instruments.ni_imaq import NIIMAQSession, SubArray, FrameGrabberAqRegion
+from ni_imaq import NIIMAQSession, SubArray, FrameGrabberAqRegion
 import re
-import struct
-from tcp import TCP
-from instruments.instrument import Instrument
-from pxierrors import XMLError, IMAQError, HardwareError
+import logging
+
+# local imports
+from instrument import Instrument
+from pxierrors import IMAQError, HardwareError
 
 
 class Hamamatsu(Instrument):
@@ -51,19 +52,29 @@ class Hamamatsu(Instrument):
     # Error Codes ----------------------------------------------------------------------------------
     IMG_ERR_BINT = NIIMAQSession.IMG_ERR_BINT  # Invalid interface or session
 
-    def __init__(self, pxi, node: ET.Element = None):
+    def __init__(self,num_images,analog_gain,exposure_time,em_gain,scan_mode,super_pixel_binning,
+                 num_img_buffers,shots_per_measurement,low_light_sensitivity,cooling,fan):
+
+        # Setup logging
+        self.root_logger = logging.getLogger()  # root_logger
+        self._root_logging_lvl_default = self.root_logger.level
+        self.sh = self.root_logger.handlers[0]  # stream_handler
+        self._sh_lvl_default = self.sh.level
+
+        self.logger = logging.getLogger(self.__class__.__name__)
+        self.logger.setLevel(logging.DEBUG)
+
         self.measurement_success = False  # Tracks whether self.last_measurement is useful.
 
         # Labview Camera variables
         self.is_initialized = False
-        self.num_images = 0
+        self.num_images = num_images #0
         self.camera_roi_file_refnum = 0
         # Labview Hamamatsu variables
-        # TODO : @Juan compile descriptions of settings set bellow for ease of use later
-        self.enable = False  # called "use camera?" in labview
-        self.analog_gain = 0  # 0-5
-        self.exposure_time = 0  # can be scientific format
-        self.em_gain = 0  # 0-255
+        # self.enable = False  # called "use camera?" in labview
+        self.analog_gain = analog_gain  # 0  # 0-5
+        self.exposure_time = exposure_time  # can be scientific format
+        self.em_gain = analog_gain  # 0-255
         self.trigger_polarity = self.TRIG_POLARITY_VALUES[
             self.TRIG_POLARITY_VALUES["default"]
         ]  # positive by default
@@ -74,150 +85,27 @@ class Hamamatsu(Instrument):
         self.external_trigger_source = self.EXT_TRIG_SOURCE_VALUES[
             self.EXT_TRIG_SOURCE_VALUES["default"]
         ]
-        self.scan_mode = self.SCAN_MODE_VALUES[self.SCAN_MODE_VALUES["default"]]
-        self.super_pixel_binning = ""  # WHERES. MY. SUPER. SUIT?
+        self.scan_mode = scan_mode #self.SCAN_MODE_VALUES[self.SCAN_MODE_VALUES["default"]]
+        self.super_pixel_binning = super_pixel_binning # WHERES. MY. SUPER. SUIT?
         # Uses uint16 in labview, use ints here, cast where necessary
-        self.sub_array = SubArray(0, 0, 0, 0)
-        self.num_img_buffers = 0  # imageBuffers in labview; renamed by tag name.
-        self.shots_per_measurement = 2
+        self.sub_array = SubArray(0, 0, 512, 512)
+        self.num_img_buffers = num_img_buffers #0  # imageBuffers in labview; renamed by tag name.
+        self.shots_per_measurement = shots_per_measurement
         self.images_to_U16 = False
-        self.low_light_sensitivity = self.LL_SENSITIVITY_VALUES[
-            self.LL_SENSITIVITY_VALUES["default"]
-        ]
-        self.cooling = self.COOLING_VALUES[self.COOLING_VALUES["default"]]
-        self.fan = self.FAN_VALUES[self.FAN_VALUES["default"]]
+        self.low_light_sensitivity = low_light_sensitivity #self.LL_SENSITIVITY_VALUES[
+            #self.LL_SENSITIVITY_VALUES["default"]
+        #]
+        self.cooling = cooling #self.COOLING_VALUES[self.COOLING_VALUES["default"]]
+        self.fan = fan #self.FAN_VALUES[self.FAN_VALUES["default"]]
         # Uses int32 in labview, use ints here, cast where necessary
-        self.fg_acquisition_region = FrameGrabberAqRegion(0, 0, 0, 0)
+        self.fg_acquisition_region = FrameGrabberAqRegion(0, 512, 0, 512)
         self.session = NIIMAQSession()
         self.last_frame_acquired = -1
         self.camera_temp: float = 0.0
         # Holds data from previous measurement in 3D array (shots,x,y)
         self.last_measurement = np.array([])
 
-        super().__init__(pxi, "camera", node)
-
-    def load_xml(self, node: ET.Element):
-        """
-        parse xml by tag to initialize Hamamatsu class attributes
-
-        Args:
-            'node': node with tag="camera"
-        """
-        super().load_xml(node)
-
-        if not (self.exit_measurement or self.stop_connections):
-
-            for child in node:
-
-                if self.exit_measurement or self.stop_connections:
-                    break
-
-                try:
-                    # handle each tag by name:
-                    if child.tag == "version":
-                        # labview code checks if camera settings are from
-                        # "2015.05.24", which is hardcoded. probably don't need
-                        # this case?
-                        # TODO : Check if this info is used anywhere in labview
-                        pass
-                    elif child.tag == "enable":
-                        self.enable = self.str_to_bool(child.text)
-
-                    elif child.tag == "analogGain":
-                        gain = self.str_to_int(child.text)
-                        as_ms = f"analogGain = {gain}\n analogGain must be between 0  and 5"
-                        assert 0 < gain < 5, as_ms
-                        self.analog_gain = gain
-
-                    elif child.tag == "exposureTime":
-                        # can convert scientifically-formatted numbers - good
-                        self.exposure_time = float(child.text)
-
-                    elif child.tag == "EMGain":
-                        gain = self.str_to_int(child.text)
-                        as_ms = f"EMGain is {gain}. EMGain must be between 0 and 255"
-                        assert 0 <= gain <= 255, as_ms
-                        self.em_gain = gain
-
-                    elif child.tag == "triggerPolarity":
-                        self.set_by_dict("trigger_polarity", child.text, self.TRIG_POLARITY_VALUES)
-
-                    elif child.tag == "externalTriggerMode":
-                        self.set_by_dict(
-                            "external_trigger_mode",
-                            child.text,
-                            self.EXT_TRIG_SOURCE_MODE_VALUES
-                        )
-
-                    elif child.tag == "scanSpeed":
-                        self.set_by_dict("scan_speed", child.text, self.SCAN_SPEED_VALUES)
-
-                    elif child.tag == "lowLightSensitivity":
-                        self.set_by_dict(
-                            "low_light_sensitivity",
-                            child.text,
-                            self.LL_SENSITIVITY_VALUES
-                        )
-
-                    elif child.tag == "externalTriggerSource":
-                        self.set_by_dict(
-                            "external_trigger_source",
-                            child.text,
-                            self.EXT_TRIG_SOURCE_VALUES
-                        )
-
-                    elif child.tag == "cooling":
-                        self.set_by_dict("cooling", child.text, self.COOLING_VALUES)
-
-                    elif child.tag == "fan":
-                        self.set_by_dict("fan", child.text, self.FAN_VALUES)
-
-                    elif child.tag == "scanMode":
-                        self.set_by_dict("scan_mode", child.text, self.SCAN_MODE_VALUES)
-
-                    elif child.tag == "superPixelBinning":
-                        self.super_pixel_binning = child.text
-
-                    elif child.tag == "subArrayLeft":
-                        self.sub_array.left = Instrument.str_to_int(child.text)
-
-                    elif child.tag == "subArrayTop":
-                        self.sub_array.top = Instrument.str_to_int(child.text)
-
-                    elif child.tag == "subArrayWidth":
-                        self.sub_array.width = Instrument.str_to_int(child.text)
-
-                    elif child.tag == "subArrayHeight":
-                        self.sub_array.height = Instrument.str_to_int(child.text)
-
-                    elif child.tag == "frameGrabberAcquisitionRegionLeft":
-                        self.fg_acquisition_region.left = Instrument.str_to_int(child.text)
-
-                    elif child.tag == "frameGrabberAcquisitionRegionTop":
-                        self.fg_acquisition_region.top = Instrument.str_to_int(child.text)
-
-                    elif child.tag == "frameGrabberAcquisitionRegionRight":
-                        self.fg_acquisition_region.right = Instrument.str_to_int(child.text)
-
-                    elif child.tag == "frameGrabberAcquisitionRegionBottom":
-                        self.fg_acquisition_region.bottom = Instrument.str_to_int(child.text)
-
-                    elif child.tag == "numImageBuffers":
-                        self.num_img_buffers = Instrument.str_to_int(child.text)
-
-                    elif child.tag == "shotsPerMeasurement":
-                        self.shots_per_measurement = Instrument.str_to_int(child.text)
-
-                    elif child.tag == "forceImagesToU16":
-                        self.images_to_U16 = Instrument.str_to_bool(child.text)
-
-                    else:
-                        self.logger.warning(f"Node {child.tag} is not a valid Hamamatsu attribute")
-
-                except (KeyError, ValueError, AssertionError) as e:
-                    raise XMLError(self, child, message=f"{e}")
-
-        self.logger.debug(f"Hamamatsu XML loaded. self.enable = {self.enable}")
+        # super().__init__(pxi, "camera", node)
 
     def init(self):
         """
@@ -229,12 +117,12 @@ class Hamamatsu(Instrument):
         This function should only be called after load_xml has been called at least once.
         """
 
-        self.logger.debug(f"Initializing Hamamatsu. self.enable = {self.enable}")
-        if self.stop_connections or self.reset_connection:
-            return
-
-        if not self.enable:
-            return
+        self.logger.debug("Initializing Hamamatsu.")
+        # if self.stop_connections or self.reset_connection:
+        #     return
+        #
+        # if not self.enable:
+        #     return
 
         if self.is_initialized:
             self.close()
@@ -420,11 +308,11 @@ class Hamamatsu(Instrument):
         be desired - Juan
         """
         self.measurement_success = False
-        if self.stop_connections or self.reset_connection:
-            return
-
-        if not self.enable:
-            return
+        # if self.stop_connections or self.reset_connection:
+        #     return
+        #
+        # if not self.enable:
+        #     return
 
         self.logger.debug("Getting data!")
         try:
@@ -469,7 +357,7 @@ class Hamamatsu(Instrument):
             try:
                 self.last_measurement[i, :, :] = img
             except IndexError as e:
-                self.logger.warning(f"{e}\nThere were too many indeces")
+                self.logger.warning(f"{e}\nThere were too many indices")
                 break
 
         self.measurement_success = True
@@ -482,61 +370,61 @@ class Hamamatsu(Instrument):
         """
         Reads the camera temperature, sets self.cameraTemp to the new value
         """
-        if self.stop_connections or self.reset_connection:
+        # if self.stop_connections or self.reset_connection:
+        #     return
+        #
+        # if self.enable:
+        msg_in = "?TMP"
+        try:
+            er_c, msg_out = self.session.hamamatsu_serial(msg_in)
+        except IMAQError as e:
+            self.logger.warning(
+                f"{e}\nError reading camera temperature",
+                exc_info=True)
+            self.camera_temp = np.inf
+            self.is_initialized = False
             return
 
-        if self.enable:
-            msg_in = "?TMP"
-            try:
-                er_c, msg_out = self.session.hamamatsu_serial(msg_in)
-            except IMAQError as e:
-                self.logger.warning(
-                    f"{e}\nError reading camera temperature",
-                    exc_info=True)
-                self.camera_temp = np.inf
-                self.is_initialized = False
-                return
-
-            m = re.match(r'TMP -(\d+)\.(\d+)', msg_out.decode('utf-8'))
-            try:
-                self.camera_temp = -float("{}.{}".format(m.group(1), m.group(2)))
-                self.logger.debug(f"Measured Camera temp = {self.camera_temp}")
-            except AttributeError:
-                self.camera_temp = np.inf
-                self.logger.warning(
-                    f"Could not read camera temperature. Returned value = {msg_out.decode('utf-8')}"
-                )
-
-        else:
+        m = re.match(r'TMP -(\d+)\.(\d+)', msg_out.decode('utf-8'))
+        try:
+            self.camera_temp = -float("{}.{}".format(m.group(1), m.group(2)))
+            self.logger.debug(f"Measured Camera temp = {self.camera_temp}")
+        except AttributeError:
             self.camera_temp = np.inf
+            self.logger.warning(
+                f"Could not read camera temperature. Returned value = {msg_out.decode('utf-8')}"
+                )
+        #
+        # else:
+        #     self.camera_temp = np.inf
 
-    def data_out(self) -> bytes:
-        """
-        Returns a formatted string of relevant hamamatsu data to be written to hdf5 fike
-        Returns: formatted data string
-        """
-        if self.stop_connections or self.reset_connection or not self.enable:
-            return b""
-
-        hm = "Hamamatsu"
-        hm_str = b""
-        sz = self.last_measurement.shape
-        hm_str += TCP.format_data(f"{hm}/numShots", f"{sz[0]}")
-        hm_str += TCP.format_data(f"{hm}/rows", f"{sz[1]}")
-        hm_str += TCP.format_data(f"{hm}/columns", f"{sz[2]}")
-
-        for shot in range(sz[0]):
-            if self.measurement_success:
-                flat_ar = np.reshape(self.last_measurement[shot, :, :], sz[1] * sz[2])
-            else:
-                # A failed measurement returns useless data of all 0
-                flat_ar = np.zeroes(sz[1]*sz[2])
-            tmp_str = u16_ar_to_bytes(flat_ar)
-            hm_str += TCP.format_data(f"{hm}/shots/{shot}", tmp_str)
-
-        hm_str += TCP.format_data(f"{hm}/temperature", "{:.3f}".format(self.camera_temp))
-
-        return hm_str
+    # def data_out(self) -> bytes:
+    #     """
+    #     Returns a formatted string of relevant hamamatsu data to be written to hdf5 fike
+    #     Returns: formatted data string
+    #     """
+    #     # if self.stop_connections or self.reset_connection or not self.enable:
+    #     #     return b""
+    #
+    #     hm = "Hamamatsu"
+    #     hm_str = b""
+    #     sz = self.last_measurement.shape
+    #     hm_str += TCP.format_data(f"{hm}/numShots", f"{sz[0]}")
+    #     hm_str += TCP.format_data(f"{hm}/rows", f"{sz[1]}")
+    #     hm_str += TCP.format_data(f"{hm}/columns", f"{sz[2]}")
+    #
+    #     for shot in range(sz[0]):
+    #         if self.measurement_success:
+    #             flat_ar = np.reshape(self.last_measurement[shot, :, :], sz[1] * sz[2])
+    #         else:
+    #             # A failed measurement returns useless data of all 0
+    #             flat_ar = np.zeroes(sz[1]*sz[2])
+    #         tmp_str = u16_ar_to_bytes(flat_ar)
+    #         hm_str += TCP.format_data(f"{hm}/shots/{shot}", tmp_str)
+    #
+    #     hm_str += TCP.format_data(f"{hm}/temperature", "{:.3f}".format(self.camera_temp))
+    #
+    #     return hm_str
 
 
     def close(self):
@@ -558,13 +446,13 @@ class Hamamatsu(Instrument):
         self.is_initialized = False
 
 
-def u16_ar_to_bytes(ar: np.ndarray) -> bytes:
-    """
-    Converts ar to a string encoded as useful for parsing xml messages sent back to cspy
-
-    Args:
-        ar : input array. should be 1D ndarray
-    Returns:
-        string that's parsable by cspy xml receiver
-    """
-    return struct.pack(f"!{len(ar)}H", *ar)
+# def u16_ar_to_bytes(ar: np.ndarray) -> bytes:
+#     """
+#     Converts ar to a string encoded as useful for parsing xml messages sent back to cspy
+#
+#     Args:
+#         ar : input array. should be 1D ndarray
+#     Returns:
+#         string that's parsable by cspy xml receiver
+#     """
+#     return struct.pack(f"!{len(ar)}H", *ar)
